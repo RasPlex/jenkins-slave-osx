@@ -1,14 +1,14 @@
 #!/bin/bash
 #
-# Install the Jenkins JNLP slave LaunchDaemon on OS X
+# Install the Jenkins JNLP slave LaunchAgent on OS X
 #
-# See https://github.com/rhwood/jenkins-slave-osx for usage
+# See https://github.com/RasPlex/jenkins-slave-osx for usage
 
 set -u
 
 SERVICE_USER=${SERVICE_USER:-"jenkins"}
 SERVICE_GROUP=${SERVICE_GROUP:-"${SERVICE_USER}"}
-SERVICE_HOME=${SERVICE_HOME:-"/var/lib/${SERVICE_USER}"}
+SERVICE_HOME=${SERVICE_HOME:-"/Users/${SERVICE_USER}"}
 SERVICE_CONF=""   # set in create_user function
 SERVICE_WRKSPC="" # set in create_user function
 MASTER_NAME=""    # set default to jenkins later
@@ -17,11 +17,12 @@ MASTER=""
 MASTER_HTTP_PORT=""
 SLAVE_NODE=""
 SLAVE_TOKEN=""
+SLAVE_SECRET=""
 OSX_KEYCHAIN="login.keychain"
 OSX_KEYCHAIN_PASS=""
 JAVA_ARGS=${JAVA_ARGS:-""}
 INSTALL_TMP=`mktemp -d -q -t org.jenkins-ci.slave.jnlp`
-DOWNLOADS_PATH=https://raw.github.com/rhwood/jenkins-slave-osx/master
+DOWNLOADS_PATH=https://raw.githubusercontent.com/RasPlex/jenkins-slave-osx/master
 
 function create_user() {
 	# see if user exists
@@ -61,12 +62,15 @@ function install_files() {
 	if [ ! -d ${SERVICE_WRKSPC} ] ; then
 		sudo mkdir -p ${SERVICE_WRKSPC}
 	fi
-	# download the LaunchDaemon
+	if [ ! -d ${SERVICE_HOME}/Library/LaunchAgents ] ; then
+		sudo mkdir -p ${SERVICE_HOME}/Library/LaunchAgents
+	fi
+	# download the LaunchAgent
 	sudo curl --silent -L --url ${DOWNLOADS_PATH}/org.jenkins-ci.slave.jnlp.plist -o ${SERVICE_WRKSPC}/org.jenkins-ci.slave.jnlp.plist
 	sudo sed -i '' "s#\${JENKINS_HOME}#${SERVICE_WRKSPC}#g" ${SERVICE_WRKSPC}/org.jenkins-ci.slave.jnlp.plist
 	sudo sed -i '' "s#\${JENKINS_USER}#${SERVICE_USER}#g" ${SERVICE_WRKSPC}/org.jenkins-ci.slave.jnlp.plist
-	sudo rm -f /Library/LaunchDaemons/org.jenkins-ci.slave.jnlp.plist
-	sudo install -o root -g wheel -m 644 ${SERVICE_WRKSPC}/org.jenkins-ci.slave.jnlp.plist /Library/LaunchDaemons/org.jenkins-ci.slave.jnlp.plist
+	sudo rm -f ${SERVICE_HOME}/Library/LaunchAgents/org.jenkins-ci.slave.jnlp.plist
+	sudo install -o ${SERVICE_USER} -g ${SERVICE_GROUP} -m 644 ${SERVICE_WRKSPC}/org.jenkins-ci.slave.jnlp.plist ${SERVICE_HOME}/Library/LaunchAgents/org.jenkins-ci.slave.jnlp.plist
 	# download the jenkins JNLP slave script
 	sudo curl --silent -L --url ${DOWNLOADS_PATH}/slave.jnlp.sh -o ${SERVICE_WRKSPC}/slave.jnlp.sh
 	sudo chmod 755 ${SERVICE_WRKSPC}/slave.jnlp.sh
@@ -84,22 +88,24 @@ function install_files() {
 
 function process_args {
 	if [ -f ${SERVICE_CONF} ]; then
-		sudo chmod 666 ${SERVICE_CONF}
+		chmod 666 ${SERVICE_CONF}
 		source ${SERVICE_CONF}
-		sudo chmod 400 ${SERVICE_CONF}
+		chmod 400 ${SERVICE_CONF}
 		SLAVE_NODE="${SLAVE_NODE:-$JENKINS_SLAVE}"
+		SLAVE_SECRET="${SLAVE_SECRET:-$JENKINS_SECRET}"
 		MASTER=${MASTER:-$JENKINS_MASTER}
 		MASTER_HTTP_PORT=${HTTP_PORT}
 		MASTER_USER=${MASTER_USER:-$JENKINS_USER}
 	fi
 	if [ -f ${SERVICE_HOME}/Library/.keychain_pass ]; then
-		sudo chmod 666 ${SERVICE_HOME}/Library/.keychain_pass
+		chmod 666 ${SERVICE_HOME}/Library/.keychain_pass
 		source ${SERVICE_HOME}/Library/.keychain_pass
-		sudo chmod 400 ${SERVICE_HOME}/Library/.keychain_pass
+		chmod 400 ${SERVICE_HOME}/Library/.keychain_pass
 	fi
 	while [ $# -gt 0 ]; do
 		case $1 in
 			--node=*) SLAVE_NODE="${1#*=}" ;;
+			--secret=*) SLAVE_SECRET="${1#*=}" ;;
 			--user=*) MASTER_USER=${1#*=} ;;
 			--master=*) MASTER=${1#*=} ;;
 			--java-args=*) JAVA_ARGS="${1#*=}" ;;
@@ -136,26 +142,44 @@ function configure_daemon {
 		read -p "Name of this slave on ${MASTER_NAME} [$SLAVE_NODE]: " RESPONSE
 		SLAVE_NODE="${RESPONSE:-$SLAVE_NODE}"
 	fi
-	if [ -z $MASTER_USER ]; then
-		[ "${SERVICE_USER}" != "jenkins" ] && MASTER_USER=${SERVICE_USER} || MASTER_USER=`whoami`
+	if [ ! -z $SLAVE_SECRET ]; then
 		echo
-		read -p "Account that ${SLAVE_NODE} connects to ${MASTER_NAME} as [${MASTER_USER}]: " RESPONSE
-		MASTER_USER=${RESPONSE:-$MASTER_USER}
+		echo "Have a secret for accessing the instance with: ${SLAVE_SECRET}"
+	elif [ -z $MASTER_USER ]; then
+		echo
+		read -p "Secret for accessing the instance with:" RESPONSE
+		SLAVE_SECRET=${RESPONSE}
 	fi
-	echo
-	echo "${MASTER_USER}'s API token is required to authenticate a JNLP slave."
-	echo "The API token is listed at ${MASTER}${MASTER_HTTP_PORT}/user/${MASTER_USER}/configure"
-	read -p "API token for ${MASTER_USER}: " SLAVE_TOKEN
-	while ! curl -L --url ${MASTER}${MASTER_HTTP_PORT}/user/${MASTER_USER} --user ${MASTER_USER}:${SLAVE_TOKEN} --insecure --silent --head --fail --output /dev/null ; do
-		echo "Unable to authenticate ${MASTER_USER} with this token"
+	if [ ! -z $SLAVE_SECRET ]; then
+		MASTER_USER=""
+	else
+		if [ -z $MASTER_USER ]; then
+			[ "${SERVICE_USER}" != "jenkins" ] && MASTER_USER=${SERVICE_USER} || MASTER_USER=`whoami`
+			echo
+			read -p "Account that ${SLAVE_NODE} connects to ${MASTER_NAME} as [${MASTER_USER}]: " RESPONSE
+			MASTER_USER=${RESPONSE:-$MASTER_USER}
+		fi
+		echo
+		echo "${MASTER_USER}'s API token is required to authenticate a JNLP slave."
+		echo "The API token is listed at ${MASTER}${MASTER_HTTP_PORT}/user/${MASTER_USER}/configure"
 		read -p "API token for ${MASTER_USER}: " SLAVE_TOKEN
-	done
-	OSX_KEYCHAIN_PASS=${OSX_KEYCHAIN_PASS:-`env LC_CTYPE=C tr -dc "a-zA-Z0-9-_" < /dev/urandom | head -c 20`}
-	create_keychain
-	sudo -i -u ${SERVICE_USER} ${SERVICE_WRKSPC}/security.sh set-password --password=${SLAVE_TOKEN} --account=${MASTER_USER} --service=\"${SLAVE_NODE}\"
-	KEYSTORE_PASS=`sudo -i -u ${SERVICE_USER} ${SERVICE_WRKSPC}/security.sh get-password --account=${SERVICE_USER} --service=java_truststore`
-	KEYSTORE_PASS=${KEYSTORE_PASS:-`env LC_CTYPE=C tr -dc "a-zA-Z0-9-_" < /dev/urandom | head -c 20`}
-	sudo -i -u ${SERVICE_USER} ${SERVICE_WRKSPC}/security.sh set-password --password=${KEYSTORE_PASS} --account=${SERVICE_USER} --service=java_truststore
+		while ! curl -L --url ${MASTER}${MASTER_HTTP_PORT}/user/${MASTER_USER} --user ${MASTER_USER}:${SLAVE_TOKEN} --insecure --silent --head --fail --output /dev/null ; do
+			echo "Unable to authenticate ${MASTER_USER} with this token"
+			read -p "API token for ${MASTER_USER}: " SLAVE_TOKEN
+		done
+		if [ -z $OSX_KEYCHAIN_PASS ]; then
+			OSX_KEYCHAIN_PASS=${OSX_KEYCHAIN_PASS:-`env LC_CTYPE=C tr -dc "a-zA-Z0-9-_" < /dev/urandom | head -c 20`}
+			echo
+			read -p "Password for account and login keychain [$OSX_KEYCHAIN_PASS]: " RESPONSE
+			OSX_KEYCHAIN_PASS=${RESPONSE:-$OSX_KEYCHAIN_PASS}
+			sudo dscl /Local/Default -passwd /Users/${SERVICE_USER} ${OSX_KEYCHAIN_PASS}
+		fi
+		create_keychain
+		sudo -i -u ${SERVICE_USER} ${SERVICE_WRKSPC}/security.sh set-password --password=${SLAVE_TOKEN} --account=${MASTER_USER} --service=\"${SLAVE_NODE}\"
+		KEYSTORE_PASS=`sudo -i -u ${SERVICE_USER} ${SERVICE_WRKSPC}/security.sh get-password --account=${SERVICE_USER} --service=java_truststore`
+		KEYSTORE_PASS=${KEYSTORE_PASS:-`env LC_CTYPE=C tr -dc "a-zA-Z0-9-_" < /dev/urandom | head -c 20`}
+		sudo -i -u ${SERVICE_USER} ${SERVICE_WRKSPC}/security.sh set-password --password=${KEYSTORE_PASS} --account=${SERVICE_USER} --service=java_truststore
+	fi
 	if [ "$PROTOCOL" == "https" ]; then
 		echo "
 If the certificate for ${MASTER_NAME} is not trusted by Java, you will need 
@@ -193,8 +217,8 @@ Do you wish to create SSH keys for this ${SERVICE_USER}? These keys will be
 suitable for GitHub, amoung other services. Keys generated at this point will
 not be protected by a password.
 "
-		read -p "Create SSH keys? (yes/no) [yes]" CONFIRM
-		CONFIRM=${CONFIRM:-yes}
+		read -p "Create SSH keys? (yes/no) [no]" CONFIRM
+		CONFIRM=${CONFIRM:-no}
 		if [[ "${CONFIRM}" =~ ^[Yy] ]] ; then
 			sudo -i -u ${SERVICE_USER} ssh-keygen -t rsa -N \'\' -f ${SERVICE_HOME}/.ssh/id_rsa -C \"${SERVICE_USER}@${SLAVE_NODE}\"
 		fi
@@ -230,8 +254,8 @@ logged into GitHub as the user that Jenkins connects to GitHub as
 }
 
 function configure_adc {
-	read -p "Will this slave need Apple Developer Certificates? (yes/no) [yes]" CONFIRM
-	CONFIRM=${CONFIRM:-yes}
+	read -p "Will this slave need Apple Developer Certificates? (yes/no) [no]" CONFIRM
+	CONFIRM=${CONFIRM:-no}
 	if [[ "${CONFIRM}" =~ ^[Yy] ]] ; then
 		echo "Importing WWDR intermediate certificate..."
 		sudo -i -u ${SERVICE_USER} curl  --silent -L --remote-name --url https://developer.apple.com/certificationauthority/AppleWWDRCA.cer
@@ -294,6 +318,7 @@ function write_config {
 	echo "JENKINS_MASTER=${MASTER}" >> ${CONF_TMP}
 	echo "HTTP_PORT=${MASTER_HTTP_PORT}" >> ${CONF_TMP}
 	echo "JENKINS_USER=${MASTER_USER}" >> ${CONF_TMP}
+	echo "JENKINS_SECRET=${SLAVE_SECRET}" >> ${CONF_TMP}
 	echo "JAVA_ARGS=\"${JAVA_ARGS}\"" >> ${CONF_TMP}
 	sudo mv ${CONF_TMP} ${SERVICE_CONF}
 	# secure the config file
@@ -307,16 +332,16 @@ function start_daemon {
 The Jenkins JNLP Slave service is installed
 
 This service can be started using the command
-    sudo launchctl load /Library/LaunchDaemons/org.jenkins-ci.slave.jnlp.plist
+    launchctl load ${SERVICE_HOME}/Library/LaunchAgents/org.jenkins-ci.slave.jnlp.plist
 and stopped using the command
-    sudo launchctl unload /Library/LaunchDaemons/org.jenkins-ci.slave.jnlp.plist
+    launchctl unload ${SERVICE_HOME}/Library/LaunchAgents/org.jenkins-ci.slave.jnlp.plist
 
 This service logs to /var/log/${SERVICE_USER}/org.jenkins-ci.slave.jnlp.log
 "
 	read -p "Start the slave service now (yes/no) [yes]? " CONFIRM
 	CONFIRM=${CONFIRM:-"yes"}
 	if [[ "${CONFIRM}" =~ ^[Yy] ]] ; then
-		sudo launchctl load -F /Library/LaunchDaemons/org.jenkins-ci.slave.jnlp.plist
+		launchctl load -F ${SERVICE_HOME}/Library/LaunchAgents/org.jenkins-ci.slave.jnlp.plist
 		echo
 		read -p "Open Console.app to view logs now (yes/no) [yes]? " CONFIRM
 		CONFIRM=${CONFIRM:-"yes"}
